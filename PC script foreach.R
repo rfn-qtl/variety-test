@@ -2,13 +2,17 @@
 # Pre-Comercial test analysis - 2022
 # Roberto Fritsche-Neto
 # rfneto@agcenter.lsu.edu
-# Last update: Sep 30 2022
+# Last update: Oct 3 2022
 #####################################
-
-### loading files
+study <- "PC"
+###################### loading files
 #loading files
-data <- read.csv("PC_2022_phenotype.csv")
-metadata <- read.csv("2022 PC Entry List.csv")
+data <- read.csv("phenotype.csv", #skip = 3
+                 )
+metadata <- read.csv("metadata.csv")
+
+pipeline <- paste0(unique(data$studyYear), "_", study)
+trials <- unique(data$locationName)
 
 outersect <- function(x, y) {
   sort(c(setdiff(x, y),
@@ -48,11 +52,9 @@ detectCores()
 registerDoParallel(cores = detectCores()) # type the number of cores you want to use
 getDoParWorkers()
 
-trials <- unique(data$locationName)
-st <- 1:length((trials))
-
+#running all the single-trials in parallel 
 system.time(
-results.st <- foreach(i = st, 
+results.st <- foreach(i = 1:length((trials)), 
                           .packages = c("SpATS", "car", "data.table"), 
                           .combine = "rbind", 
                           .multicombine = TRUE, 
@@ -129,29 +131,22 @@ results.st <- foreach(i = st,
 )
 
 output <- results.st
-head(output)
+# saving the output file for single-trials analysis
+write.csv(output, paste0(pipeline, "_", "output_single-trials.csv"))
 
 # estimate how many trials were eliminated by singularities
-length(unique(output$Location))
+length(trials) - length(unique(output$Location))
 # eliminate trials with low Cullis heritability
 unique(output$H.cullis)
 output <- output[output$H.cullis > 0.50,]
 # the final dimensions after QC
 length(unique(output$Location))
-# saving the file
-saveRDS(output, "results.st")
 
 ##################################################
 # second step - joint analysis
 ##################################################
-
 # merge metadata and remove fillers
 output <- merge(output, metadata)
-length(unique(output$germplasmName))
-all(unique(output$germplasmName) %in% entries)
-all(entries %in% unique(output$germplasmName))
-head(output)
-dim(output)
 
 # Fitting genotype by environment model - joint analysis
 library(sommer)
@@ -164,29 +159,22 @@ fitMET <- mmer(BLUE ~ 1,
 
 # Broad-sense heritability
 nloc <- length(unique(output$Location))
-(h2g.MET <- vpredict(fitMET, h2 ~ V2 / ( V2 + V3/nloc))) # MET level
+h2g.MET <- vpredict(fitMET, h2 ~ V2 / ( V2 + V3/nloc)) # MET level
 
 # predicting the BLUP - main effect
 BLUPs.main <- predict.mmer(object = fitMET, classify = "germplasmName")
-BLUPs.main$pvals
 # reliability
-mean(1 - BLUPs.main$pvals$standard.error^2 / summary(fitMET)$varcomp[2,1])
+rel <- mean(1 - BLUPs.main$pvals$standard.error^2 / summary(fitMET)$varcomp[2,1])
 
 # predicting the BLUP per enviroment
 BLUPs.MET <- predict.mmer(object = fitMET, classify = c("germplasmName","Location"))
-BLUPs.MET$pvals
-
-# this dataset will be used to request the year of cross or pedigree
-saveRDS(BLUPs.MET, "BLUPs.MET") 
-saveRDS(BLUPs.main, "BLUPs.main") 
 
 rice.handbook.table <- round(reshape2::acast(BLUPs.MET$pvals, germplasmName ~  Location, value.var = "predicted.value"))
-write.csv(rice.handbook.table, "rice.handbook.table.csv")
+write.csv(rice.handbook.table, paste0(pipeline, "_rice.handbook.table.csv"))
 
 # barplot graph with confidence interval using main
 data.plot <- BLUPs.main$pvals
 data.plot <- merge(data.plot, metadata)
-dim(data.plot)
 
 limits <- aes(ymax = data.plot$predicted.value + data.plot$standard.error*1.96,
               ymin = data.plot$predicted.value - data.plot$standard.error*1.96)
@@ -203,11 +191,13 @@ p <- ggplot(data = data.plot, aes(x = reorder(germplasmName, -predicted.value), 
   theme(legend.position = "bottom", legend.box = "horizontal") +
   annotate("text", x=length(unique(data.plot$germplasmName))/2, 
            y=max(data.plot$predicted.value), 
-           label= paste("Accuracy = ", round(sqrt(h2g.MET[1]), 2)*100, "%")) +
+           label= paste("Reliability = ", round(rel, 2)*100, "%")) +
   labs(x = "", fill = "Breeding Program") +
-  labs(color = "")
+  labs(color = "") + 
+  coord_cartesian(ylim=c(min(data.plot$predicted.value - data.plot$standard.error*1.96),
+                           max(data.plot$predicted.value + data.plot$standard.error*1.96)))
 
-ggsave(filename = './Overall_performances.tiff',
+ggsave(filename = paste0("./", pipeline, '_overall_performances.tiff'),
        plot = p,
        device = 'tiff',
        width = 280,
@@ -215,34 +205,28 @@ ggsave(filename = './Overall_performances.tiff',
        units = 'mm',
        dpi = 300)
 
+data.plot$standard.error <- data.plot$standard.error*1.96
+colnames(data.plot)[1:4] <- c("Estimate", "Variety", "Yield", "Confidence_interval")
+# saving the output file for single-trials analysis
+write.csv(data.plot, paste0(pipeline, "_", "overall_performances.csv"))
 
 #######################################
-# third step - MET analysis
+# third step - GGE MET analysis
 #######################################
 library(statgenGxE)
 
 data.MET <- BLUPs.MET$pvals
-head(data.MET)
 colnames(data.MET)[c(2,4)] <- c("Variety", "Yield") 
 
 ## Create a TD object
 dropsTD <- statgenSTA::createTD(data = data.MET, genotype = "Variety", trial = "Location")
-
 ## Fit a model where trials are nested within scenarios.
 dropsVarComp <- gxeVarComp(TD = dropsTD, trait = "Yield")
-summary(dropsVarComp)
-vc(dropsVarComp)
-## Compute heritability
-herit(dropsVarComp)
-
-
 # Finlay-Wilkinson Analysis
-## Perform a Finlay-Wilkinson analysis for all trials.
 dropsFW <- gxeFw(TD = dropsTD, trait = "Yield")
-summary(dropsFW)
 
 # reorganizing the data
-test <- matrix(dropsFW$TD$`Lake Arthur`$beta) %*% matrix(sort(dropsFW$envEffs[,2]), nrow = 1) + dropsFW$estimates[,2]
+test <- matrix(dropsFW$TD[[1]]$beta) %*% matrix(sort(dropsFW$envEffs[,2]), nrow = 1) + dropsFW$estimates[,2]
 locations <- c(trials) 
 locations <- as.character(locations[match(sort(dropsFW$envEffs[,2]), dropsFW$envEffs[,2])])
 colnames(test) <- sort(dropsFW$envEffs[,2])
@@ -252,24 +236,22 @@ colnames(test)[2:ncol(test)] <- sort(dropsFW$envEffs[,2])
 test <- melt(test)
 test$variable <- as.numeric(as.character(test$variable))
 
-
-## Line plot for MET
-q <- ggplot(data = BLUPs.MET$pvals, aes(x = reorder(Location, BLUPs.MET$pvals$predicted.value),
-                                        y = predicted.value, 
-                                        group = germplasmName, 
-                                        colour = germplasmName)) + 
-  geom_line() + geom_point() + 
-  labs(x = "Location", y = "Yield") +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-
-ggsave(filename = './Actual_performance_across_locations.tiff',
-       plot = q,
-       device = 'tiff',
-       width = 300,
-       height = 400,
-       units = 'mm',
-       dpi = 300)
-
+# ## Line plot for MET
+# q <- ggplot(data = BLUPs.MET$pvals, aes(x = reorder(Location, BLUPs.MET$pvals$predicted.value),
+#                                         y = predicted.value, 
+#                                         group = germplasmName, 
+#                                         colour = germplasmName)) + 
+#   geom_line() + geom_point() + 
+#   labs(x = "Location", y = "Yield") +
+#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+# 
+# ggsave(filename = paste0("./", pipeline, '.actual_performance_across_locations.tiff'),
+#        plot = q,
+#        device = 'tiff',
+#        width = 300,
+#        height = 400,
+#        units = 'mm',
+#        dpi = 300)
 
 ## Create line plot for Finlay Wilkinson analysis.
 q <- ggplot(data = test, aes(x = variable, 
@@ -282,8 +264,7 @@ q <- ggplot(data = test, aes(x = variable,
   geom_vline(xintercept = meanEnV <- mean(dropsFW$envEffs[,2]), colour = "grey") +
   scale_x_continuous(breaks = round(dropsFW$envEffs[,2]), sec.axis = dup_axis(labels = locations))
 
-
-ggsave(filename = './Stability_adpatability_across_locations.tiff',
+ggsave(filename = paste0("./", pipeline, '_stability_adaptability_across_locations.tiff'),
        plot = q,
        device = 'tiff',
        width = 300,
@@ -291,17 +272,15 @@ ggsave(filename = './Stability_adpatability_across_locations.tiff',
        units = 'mm',
        dpi = 300)
 
-
 # GGE Biplot
 library(metan)
-head(data.MET)
 model <- gge(data.MET, Location, Variety, Yield, svp = "symmetrical")
 a <- plot(model, type = 1)
 b <- plot(model, type = 2)
 c <- plot(model, type = 3)
 d <- arrange_ggplot(a, b, c, tag_levels = "a")
 
-ggsave(filename = './GGE_Biplots.tiff',
+ggsave(filename = paste0("./", pipeline, '_GGE_Biplots.tiff'),
        plot = d,
        device = 'tiff',
        width = 400,
